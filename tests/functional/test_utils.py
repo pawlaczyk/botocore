@@ -13,9 +13,12 @@
 import os
 import tempfile
 import shutil
-from tests import unittest
+from tests import unittest, mock
 
-from botocore.utils import FileWebIdentityTokenLoader
+from botocore.exceptions import (EndpointConnectionError, HTTPClientError,
+                                InvalidIMDSEndpointError)
+from botocore.utils import FileWebIdentityTokenLoader, InstanceMetadataFetcher
+from urllib3.exceptions import LocationParseError
 
 
 class TestFileWebIdentityTokenLoader(unittest.TestCase):
@@ -40,3 +43,24 @@ class TestFileWebIdentityTokenLoader(unittest.TestCase):
         loader = FileWebIdentityTokenLoader(self.token_file)
         token = loader()
         self.assertEqual(self.token, token)
+
+
+class TestInstanceMetadataFetcher(unittest.TestCase):
+    def test_catch_retryable_http_errors(self):
+        with mock.patch('botocore.httpsession.URLLib3Session.send') as send_mock:
+            fetcher = InstanceMetadataFetcher()
+            send_mock.side_effect = EndpointConnectionError(endpoint_url="foo")
+            fetcher.retrieve_iam_role_credentials()
+        self.assertEquals(send_mock.call_count, 2)
+        call_one = send_mock.call_args_list[0][0][0]
+        call_two = send_mock.call_args_list[1][0][0]
+        self.assertTrue(call_one.url.startswith(fetcher.get_base_url()))
+        self.assertTrue(call_two.url.startswith(fetcher.get_base_url()))
+
+    def test_catch_invalid_imds_error(self):
+        with mock.patch('botocore.httpsession.URLLib3Session.send') as send_mock:
+            fetcher = InstanceMetadataFetcher()
+            e = LocationParseError(location="foo")
+            send_mock.side_effect = HTTPClientError(error=e)
+            with self.assertRaises(InvalidIMDSEndpointError):
+                fetcher.retrieve_iam_role_credentials()
